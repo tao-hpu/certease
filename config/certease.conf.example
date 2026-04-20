@@ -1,0 +1,74 @@
+# certease host config — copy to /etc/certease.conf
+#
+# This file is sourced as bash. Values left empty are auto-detected.
+# Only `LOG_DIR`, `WARN_DAYS`, `CRITICAL_DAYS` have hard defaults
+# (see lib/common.sh :: load_config).
+
+# ---------------------------------------------------------------------------
+# Nginx deployment
+# ---------------------------------------------------------------------------
+
+# Override nginx SSL deployment directory. Leave empty to auto-detect from
+# nginx flavor:
+#   std  → /etc/nginx/ssl
+#   lnmp → /usr/local/nginx/conf/ssl
+#   bt   → /www/server/panel/vhost/cert       (per-domain subdir inside)
+SSL_DEPLOY_DIR=""
+
+# Override the nginx reload command. Leave empty to auto-detect:
+# prefers `systemctl reload nginx` when the unit exists,
+# falls back to `nginx -s reload`.
+NGINX_RELOAD_CMD=""
+
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
+
+# Where certease writes its own logs (cron output, per-renew logs, hook log).
+LOG_DIR="/var/log/certease"
+
+# ---------------------------------------------------------------------------
+# Status thresholds (days)
+# ---------------------------------------------------------------------------
+
+# `certease status` marks certs under these thresholds as WARN / CRITICAL
+# and exits 1 / 2 respectively. Suitable for cron alerting:
+#   0 0 * * *  /opt/certease/bin/certease status || /path/to/notify.sh
+WARN_DAYS=30
+CRITICAL_DAYS=14
+
+# ---------------------------------------------------------------------------
+# Alerting (optional)
+# ---------------------------------------------------------------------------
+
+# If set, the deploy hook POSTs failure JSON to this URL.
+# Compatible with Slack incoming-webhooks, Bark, etc.
+# Payload: {"host":"<hostname>","domain":"<domain>","error":"<msg>"}
+ALERT_WEBHOOK=""
+
+# ---------------------------------------------------------------------------
+# Fallback CA
+# ---------------------------------------------------------------------------
+#
+# When a renewal fails with a fallback-eligible error (rate limit, persistent
+# retry-after > 10 min, CA-specific lockout), certease will AUTOMATICALLY
+# retry once with this CA. Saves you from sudden CA outages or limits.
+#
+# Accepted values (passed to `acme.sh --server <value>`):
+#   letsencrypt   — Let's Encrypt (default)
+#   zerossl       — ZeroSSL
+#   buypass       — Buypass
+#   google        — Google Trust Services
+#   ""            — disabled (no automatic fallback)
+#
+# Example: primary CA is ZeroSSL; on rate limit, certease retries with LE.
+FALLBACK_CA="letsencrypt"
+
+# ---------------------------------------------------------------------------
+# Account email
+# ---------------------------------------------------------------------------
+
+# If set, certease will prompt you to register this email with acme.sh
+# and certbot (so Let's Encrypt expiry warnings actually arrive).
+# NOT auto-applied — email registration is manual to avoid surprise writes.
+ACCOUNT_EMAIL=""

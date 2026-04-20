@@ -1,0 +1,23 @@
+# certease ignores
+
+# runtime logs (should never land in git)
+logs/
+tmp/
+*.log
+/.acme.sh.log
+
+# macOS
+.DS_Store
+
+# user-specific config (may contain webhook URL / emails)
+/etc/certease.conf
+certease.conf
+.env
+*.local
+
+# editor & tooling noise
+.vscode/
+.idea/
+.claude/
+*.swp
+*.swo

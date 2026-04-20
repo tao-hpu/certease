@@ -1,0 +1,427 @@
+#!/usr/bin/env bash
+# certease — wrapper + aligner for acme.sh / certbot SSL rotation.
+#
+# Subcommands: install | status | doctor | renew
+#
+# See README.md for full docs.
+
+set -euo pipefail
+
+# --- locate toolkit root ------------------------------------------------------
+SELF="${BASH_SOURCE[0]}"
+# Resolve symlinks (portable; no readlink -f dependency).
+while [[ -L "$SELF" ]]; do
+  link="$(readlink "$SELF")"
+  case "$link" in
+    /*) SELF="$link" ;;
+    *)  SELF="$(cd "$(dirname "$SELF")" && pwd)/$link" ;;
+  esac
+done
+BIN_DIR="$(cd "$(dirname "$SELF")" && pwd)"
+CERTEASE_ROOT="$(cd "$BIN_DIR/.." && pwd)"
+export CERTEASE_ROOT
+
+# shellcheck source=../lib/common.sh
+. "$CERTEASE_ROOT/lib/common.sh"
+# shellcheck source=../lib/detect.sh
+. "$CERTEASE_ROOT/lib/detect.sh"
+# shellcheck source=../lib/nginx_flavors.sh
+. "$CERTEASE_ROOT/lib/nginx_flavors.sh"
+# shellcheck source=../lib/install_cron.sh
+. "$CERTEASE_ROOT/lib/install_cron.sh"
+# shellcheck source=../lib/install_hook.sh
+. "$CERTEASE_ROOT/lib/install_hook.sh"
+# shellcheck source=../lib/status.sh
+. "$CERTEASE_ROOT/lib/status.sh"
+
+VERSION="0.1.0"
+
+usage() {
+  cat <<EOF
+certease $VERSION — keep acme.sh + certbot + nginx aligned.
+
+Usage:
+  certease install [--dry-run]
+      Ensure cron entry, logging, and deploy hooks are set on this host.
+
+  certease status
+      Print a table of all certificates (acme.sh + certbot) with days remaining.
+      Exit: 0 OK / 1 WARN (<${WARN_DAYS:-30}d) / 2 CRITICAL (<${CRITICAL_DAYS:-14}d).
+
+  certease doctor
+      Run a set of health checks and print [OK]/[WARN]/[FAIL] lines.
+      Exit: 0 / 1 / 2.
+
+  certease renew [--force] [-d DOMAIN]
+      Renew acme.sh domains due for renewal (or all if --force).
+
+Environment:
+  CERTEASE_DEBUG=1      Verbose debug logs on stderr.
+  NO_COLOR=1              Disable ANSI colors.
+
+Config: /etc/certease.conf (copy from config/certease.conf.example)
+EOF
+}
+
+# ============================================================================
+# subcommand: install
+# ============================================================================
+cmd_install() {
+  local dry=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --dry-run) dry="dry" ;;
+      -h|--help) usage; exit 0 ;;
+      *) die "install: unknown option: $1" ;;
+    esac
+    shift
+  done
+
+  [[ -z "$dry" ]] && require_root
+  load_config
+
+  log "Detecting environment..."
+  local acme_home acme_bin certbot_bin flavor nginx_bin
+  acme_home="$(detect_acme_home || true)"
+  acme_bin="$(detect_acme_bin || true)"
+  certbot_bin="$(detect_certbot_bin || true)"
+  flavor="$(detect_nginx_flavor)"
+  nginx_bin="$(detect_nginx_bin || true)"
+
+  printf '  acme.sh home    : %s\n' "${acme_home:-<not found>}"
+  printf '  acme.sh bin     : %s\n' "${acme_bin:-<not found>}"
+  printf '  certbot         : %s\n' "${certbot_bin:-<not found>}"
+  if [[ -n "$certbot_bin" ]]; then
+    if detect_certbot_timer_active; then
+      printf '  certbot.timer   : active\n'
+    else
+      printf '  certbot.timer   : inactive\n'
+    fi
+  fi
+  printf '  nginx flavor    : %s\n' "$flavor"
+  printf '  nginx bin       : %s\n' "${nginx_bin:-<not found>}"
+  printf '  ssl deploy dir  : %s\n' "$(nginx_ssl_dir "$flavor" 2>/dev/null || echo "<unknown>")"
+
+  # 1. Install /etc/certease.conf from example (if missing).
+  if [[ ! -f /etc/certease.conf ]]; then
+    if [[ "$dry" == "dry" ]]; then
+      log "[dry-run] Would install /etc/certease.conf from example"
+    else
+      install -m 0644 "$CERTEASE_ROOT/config/certease.conf.example" /etc/certease.conf
+      ok "Installed /etc/certease.conf (edit to taste)"
+    fi
+  else
+    ok "/etc/certease.conf already exists (not overwritten)"
+  fi
+
+  # 2. acme.sh: cron + logging + email + deploy hooks.
+  if [[ -n "$acme_home" && -n "$acme_bin" ]]; then
+    ensure_acme_cron "$acme_home" "$acme_bin" "$dry" || true
+    ensure_acme_logging "$acme_home" "$dry" || true
+    ensure_acme_email "$acme_home" "${ACCOUNT_EMAIL:-}" "$acme_bin" "$dry" || true
+    chmod +x "$CERTEASE_ROOT/hooks/reload-cert.sh" 2>/dev/null || true
+    ensure_deploy_hooks "$acme_home" "$acme_bin" "$flavor" "$CERTEASE_ROOT" "$dry" || true
+  else
+    warn "acme.sh not detected — skipping cron/logging/hook setup for acme.sh"
+  fi
+
+  # 3. certbot: report timer + sync email.
+  if [[ -n "$certbot_bin" ]]; then
+    if detect_certbot_timer_active; then
+      ok "certbot.timer is active (no changes needed)"
+    else
+      warn "certbot installed but certbot.timer inactive — enable with: systemctl enable --now certbot.timer"
+    fi
+    ensure_certbot_email "$certbot_bin" "${ACCOUNT_EMAIL:-}" "$dry" || true
+  fi
+
+  log "install done."
+}
+
+# ============================================================================
+# subcommand: status
+# ============================================================================
+cmd_status() {
+  print_status_table
+  return $?
+}
+
+# ============================================================================
+# subcommand: doctor
+# ============================================================================
+cmd_doctor() {
+  load_config
+  local fail=0 warn=0
+
+  local _ok=0 _warn_fn=0 _fail_fn=0
+  _ok() { printf '%s[OK]%s   %s\n'   "$C_GREEN"  "$C_RESET" "$*"; _ok=$((_ok+1)); }
+  _w()  { printf '%s[WARN]%s %s\n'   "$C_YELLOW" "$C_RESET" "$*"; warn=$((warn+1)); }
+  _f()  { printf '%s[FAIL]%s %s\n'   "$C_RED"    "$C_RESET" "$*"; fail=$((fail+1)); }
+
+  # --- acme.sh checks -------------------------------------------------------
+  local acme_home acme_bin
+  acme_home="$(detect_acme_home || true)"
+  acme_bin="$(detect_acme_bin || true)"
+
+  if [[ -n "$acme_home" ]]; then
+    if crontab -l 2>/dev/null | grep -Fq "acme.sh --cron"; then
+      _ok "acme.sh cron entry is present"
+      if crontab -l 2>/dev/null | grep "acme.sh --cron" | grep -q '/dev/null'; then
+        _w "acme.sh cron entry redirects to /dev/null (failures invisible)"
+      fi
+    else
+      _f "acme.sh installed but NO cron entry — certs will not auto-renew"
+    fi
+
+    if grep -E '^LOG_FILE=' "$acme_home/account.conf" >/dev/null 2>&1; then
+      _ok "acme.sh LOG_FILE is configured"
+    else
+      _w "acme.sh LOG_FILE is not set in account.conf"
+    fi
+
+    local now
+    now="$(date +%s)"
+    while IFS= read -r dir; do
+      [[ -z "$dir" ]] && continue
+      local domain reload nextrenew cer cer_mtime
+      domain="$(acme_dir_to_domain "$dir")"
+      reload="$(acme_conf_get "$dir" Le_ReloadCmd || true)"
+      nextrenew="$(acme_conf_get "$dir" Le_NextRenewTime || true)"
+      if [[ -f "$dir/$domain.cer" ]]; then
+        cer="$dir/$domain.cer"
+      elif [[ -f "$dir/fullchain.cer" ]]; then
+        cer="$dir/fullchain.cer"
+      else
+        cer="$(find "$dir" -maxdepth 1 -name '*.cer' ! -name 'ca.cer' ! -name '*.csr.*' | head -n1)"
+      fi
+
+      if [[ -z "$reload" ]]; then
+        _f "$domain: Le_ReloadCmd is empty (renewal won't reload nginx)"
+      else
+        _ok "$domain: Le_ReloadCmd set"
+      fi
+
+      if [[ -n "$nextrenew" && "$nextrenew" =~ ^[0-9]+$ ]]; then
+        if (( nextrenew < now )); then
+          _w "$domain: Le_NextRenewTime is in the past (due for renewal)"
+        fi
+      fi
+
+      if [[ -n "$cer" ]]; then
+        cer_mtime="$(stat -c %Y "$cer" 2>/dev/null || stat -f %m "$cer" 2>/dev/null || echo 0)"
+        if (( cer_mtime > 0 )) && (( now - cer_mtime > 86400 * 90 )); then
+          _w "$domain: .cer file older than 90 days (mtime stale)"
+        fi
+      else
+        _w "$domain: no .cer file in $dir (orphan domain dir?)"
+      fi
+    done < <(list_acme_domains "$acme_home")
+
+    # Orphan dirs (no .cer inside).
+    find "$acme_home" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | while read -r d; do
+      local b
+      b="$(basename "$d")"
+      case "$b" in
+        ca|deploy|dnsapi|http.header|notify) continue ;;
+      esac
+      if ! compgen -G "$d/*.cer" >/dev/null; then
+        printf '%s[WARN]%s %s\n' "$C_YELLOW" "$C_RESET" "orphan acme.sh dir: $d (no .cer)"
+      fi
+    done
+  else
+    _w "acme.sh not installed — skipping acme.sh checks"
+  fi
+
+  # --- nginx checks ---------------------------------------------------------
+  local nginx_bin
+  nginx_bin="$(detect_nginx_bin || true)"
+  if [[ -n "$nginx_bin" ]]; then
+    if "$nginx_bin" -t >/dev/null 2>&1; then
+      _ok "nginx -t passes"
+    else
+      _f "nginx -t fails — fix config before certs matter"
+    fi
+
+    # Check every ssl_certificate path referenced by nginx.
+    local miss=0
+    while IFS= read -r path; do
+      [[ -z "$path" ]] && continue
+      if [[ ! -f "$path" ]]; then
+        _f "nginx references missing cert: $path"
+        miss=$((miss+1))
+      fi
+    done < <("$nginx_bin" -T 2>/dev/null | awk '/^[[:space:]]*ssl_certificate[[:space:]]/ && !/_key/ {gsub(";",""); print $2}' | sort -u)
+    if [[ "$miss" -eq 0 ]]; then
+      _ok "all nginx ssl_certificate paths exist on disk"
+    fi
+  else
+    _w "nginx not detected"
+  fi
+
+  # --- certbot checks -------------------------------------------------------
+  local certbot_bin
+  certbot_bin="$(detect_certbot_bin || true)"
+  if [[ -n "$certbot_bin" ]]; then
+    if detect_certbot_timer_active; then
+      _ok "certbot.timer is active"
+    else
+      _f "certbot installed but certbot.timer inactive"
+    fi
+
+    if [[ -d /etc/letsencrypt/renewal ]]; then
+      local c
+      for c in /etc/letsencrypt/renewal/*.conf; do
+        [[ -f "$c" ]] || continue
+        local name pem
+        name="$(basename "$c" .conf)"
+        pem="/etc/letsencrypt/live/$name/fullchain.pem"
+        if [[ ! -f "$pem" ]]; then
+          _f "certbot renewal config $name has no live cert at $pem"
+        fi
+      done
+    fi
+
+    # Account email check.
+    # Prefer `certbot show_account` (reflects the live ACME server state);
+    # fall back to parsing local regr.json if that subcommand is missing.
+    local _email_checked=0 _email_ok=0 _show_out=""
+    if _show_out="$("$certbot_bin" show_account 2>/dev/null)"; then
+      _email_checked=1
+      # Look for a line like: "  Email contact: mailto:you@example.com"
+      # Treat missing line / "None" / empty as no email.
+      if printf '%s\n' "$_show_out" | grep -Eq '^[[:space:]]*Email contact:[[:space:]]*mailto:[^[:space:]]+'; then
+        _email_ok=1
+      fi
+    fi
+    if [[ "$_email_checked" -eq 0 && -d /etc/letsencrypt/accounts ]]; then
+      _email_checked=1
+      if grep -rho '"contact"[^]]*]' /etc/letsencrypt/accounts 2>/dev/null | grep -q 'mailto:'; then
+        _email_ok=1
+      fi
+    fi
+    if [[ "$_email_checked" -eq 1 ]]; then
+      if [[ "$_email_ok" -eq 1 ]]; then
+        _ok "certbot account has an email registered"
+      else
+        _w "certbot account has NO email — Let's Encrypt expiry warnings won't arrive"
+      fi
+    fi
+  fi
+
+  printf '\n%sSummary:%s OK=%d WARN=%d FAIL=%d\n' "$C_BOLD" "$C_RESET" "$_ok" "$warn" "$fail"
+
+  if [[ "$fail" -gt 0 ]]; then return 2; fi
+  if [[ "$warn" -gt 0 ]]; then return 1; fi
+  return 0
+}
+
+# Return 0 if the renewal error is the sort that another CA might succeed at.
+# Rate limits, long retry-after, CA unavailability — yes. Everything else — no.
+# (DNS problems, misconfigured webroot etc. won't be fixed by switching CAs.)
+_renew_fallback_eligible() {
+  local log="$1"
+  [[ -f "$log" ]] || return 1
+  grep -qE 'retryafter=[0-9]+ value is too large|urn:ietf:params:acme:error:rateLimited|too many (certificates|failed|recent)|rate[- ]?limit|Service (Unavailable|unavailable)|serverInternal|timeout|HTTP.* 5[0-9]{2}' "$log"
+}
+
+# ============================================================================
+# subcommand: renew
+# ============================================================================
+cmd_renew() {
+  local force="" only_domain=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --force) force=1 ;;
+      -d) only_domain="${2:?-d needs a domain}"; shift ;;
+      -h|--help) usage; exit 0 ;;
+      *) die "renew: unknown option: $1" ;;
+    esac
+    shift
+  done
+
+  require_root
+  load_config
+
+  local acme_home acme_bin
+  acme_home="$(detect_acme_home || true)"
+  acme_bin="$(detect_acme_bin || true)"
+  [[ -n "$acme_home" && -n "$acme_bin" ]] || die "acme.sh not detected"
+
+  local log_dir
+  log_dir="$(ensure_log_dir)"
+  local now
+  now="$(date +%s)"
+  local stamp
+  stamp="$(date +%Y%m%d-%H%M%S)"
+
+  local ok_n=0 fail_n=0 skip_n=0
+  while IFS= read -r dir; do
+    [[ -z "$dir" ]] && continue
+    local domain is_ecc nextrenew
+    domain="$(acme_dir_to_domain "$dir")"
+    is_ecc=""
+    [[ "$(basename "$dir")" == *_ecc ]] && is_ecc="--ecc"
+
+    if [[ -n "$only_domain" && "$domain" != "$only_domain" ]]; then
+      continue
+    fi
+
+    nextrenew="$(acme_conf_get "$dir" Le_NextRenewTime || true)"
+    if [[ -z "$force" ]]; then
+      if [[ -n "$nextrenew" && "$nextrenew" =~ ^[0-9]+$ ]] && (( nextrenew > now )); then
+        log "skip $domain (not due; next=$nextrenew)"
+        skip_n=$((skip_n+1))
+        continue
+      fi
+    fi
+
+    local runlog="$log_dir/renew-$domain-$stamp.log"
+    log "renew $domain → $runlog"
+    # shellcheck disable=SC2086
+    if "$acme_bin" --home "$acme_home" --renew -d "$domain" $is_ecc ${force:+--force} \
+        >"$runlog" 2>&1; then
+      ok "renewed $domain"
+      ok_n=$((ok_n+1))
+    elif [[ -n "${FALLBACK_CA:-}" ]] && _renew_fallback_eligible "$runlog"; then
+      log "  primary CA failed with fallback-eligible error; retrying with $FALLBACK_CA"
+      printf '\n--- primary attempt failed; retrying with --server %s ---\n' "$FALLBACK_CA" >>"$runlog"
+      # shellcheck disable=SC2086
+      if "$acme_bin" --home "$acme_home" --renew -d "$domain" $is_ecc --server "$FALLBACK_CA" --force \
+          >>"$runlog" 2>&1; then
+        ok "renewed $domain (via fallback: $FALLBACK_CA)"
+        ok_n=$((ok_n+1))
+      else
+        err "renew failed: $domain (primary + fallback both failed; see $runlog)"
+        fail_n=$((fail_n+1))
+      fi
+    else
+      err "renew failed: $domain (see $runlog)"
+      fail_n=$((fail_n+1))
+    fi
+  done < <(list_acme_domains "$acme_home")
+
+  printf '\nRenew summary: %d ok, %d failed, %d skipped\n' "$ok_n" "$fail_n" "$skip_n"
+  [[ "$fail_n" -eq 0 ]]
+}
+
+# ============================================================================
+# main
+# ============================================================================
+main() {
+  if [[ $# -eq 0 ]]; then
+    usage
+    exit 0
+  fi
+  local sub="$1"; shift
+  case "$sub" in
+    install) cmd_install "$@" ;;
+    status)  cmd_status "$@" ;;
+    doctor)  cmd_doctor "$@" ;;
+    renew)   cmd_renew "$@" ;;
+    -h|--help|help) usage ;;
+    -V|--version)   printf 'certease %s\n' "$VERSION" ;;
+    *) err "unknown subcommand: $sub"; usage; exit 2 ;;
+  esac
+}
+
+main "$@"
