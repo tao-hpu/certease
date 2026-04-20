@@ -73,6 +73,20 @@ ACCOUNT_EMAIL=you@example.com
 FALLBACK_CA=letsencrypt    # 留空则关闭 fallback
 ```
 
+## Cron
+
+`install.sh` 会自动配置续签调度，你不需要手动改 `crontab`。
+
+有 `acme.sh` 的机器上，安装器确保以下形式的 cron 已存在，并且输出重定向到 `/var/log/certease/certease-cron.log`：
+
+```
+<minute> <hour> * * * "/root/.acme.sh/acme.sh" --cron --home "/root/.acme.sh" >>/var/log/certease/certease-cron.log 2>&1
+```
+
+以 `certbot.timer`（systemd）驱动续签的机器上，安装器只验证 timer 处于 active 状态，不改动它。
+
+调度时间与命令形式从底层工具继承。`bash install.sh` 可重复执行，幂等，不会产生重复条目。
+
 ## 为什么存在
 
 一个常见模式：你手上有四五台服务器，每台都通过 `acme.sh` 做 ACME 轮换，而每台是在不同时间、由不同人或工具、在不同的 nginx 安装基础上搭起来的。一台用发行版包，一台用 LNMP 一键，两台在面板下（nginx 布局不同），还有一台用 certbot + systemd timer。

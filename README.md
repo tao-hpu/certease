@@ -73,6 +73,20 @@ ACCOUNT_EMAIL=you@example.com
 FALLBACK_CA=letsencrypt    # empty to disable fallback
 ```
 
+## Cron
+
+`install.sh` configures renewal scheduling automatically. You do not need to edit `crontab` by hand.
+
+On hosts with `acme.sh`, the installer ensures a cron entry of the form below exists and that its output is redirected to `/var/log/certease/certease-cron.log`:
+
+```
+<minute> <hour> * * * "/root/.acme.sh/acme.sh" --cron --home "/root/.acme.sh" >>/var/log/certease/certease-cron.log 2>&1
+```
+
+On hosts where renewal is driven by `certbot.timer` (systemd), the installer verifies the timer is active and leaves it untouched.
+
+Schedule and command shape are inherited from the underlying tool. Rerunning `bash install.sh` is idempotent and will not produce duplicates.
+
 ## Why this exists
 
 A common pattern: four or five servers behind your infrastructure, each running ACME rotation through `acme.sh`, each provisioned months or years apart on top of different nginx installations. One uses the distro package. One uses an LNMP one-click script. Two sit behind a control panel with its own nginx layout. One uses certbot with a systemd timer.
