@@ -1,8 +1,20 @@
+<div align="center">
+
+![certease banner](./assets/banner.jpg)
+
 # certease
 
-[English](README.md) | [中文](README.zh.md)
+![Shell: Bash](https://img.shields.io/badge/shell-bash-4EAA25?logo=gnubash&logoColor=white)
+![Platform: Linux](https://img.shields.io/badge/platform-linux-333?logo=linux&logoColor=white)
+![License: MIT](https://img.shields.io/badge/license-MIT-blue)
+[![GitHub stars](https://img.shields.io/github/stars/tao-hpu/certease?style=social)](https://github.com/tao-hpu/certease)
 
-面向异构 Linux 机群的 ACME 证书轮换标准化工具。
+[🌐 English](README.md) | [🇨🇳 中文](README.zh.md)
+
+**面向异构 Linux 机群的 ACME 证书轮换标准化工具。**
+
+</div>
+
 
 在 `acme.sh` 与 `certbot` 之上的轻量幂等 Bash 编排层。统一不同 nginx 部署方式（发行版包、LNMP 一键包、面板）下的 SSL 轮换流程：自动检测环境、安装一致的 cron、绑定经过校验的 reload 钩子，并通过单一 `doctor` 命令汇总机器状态。
 

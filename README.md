@@ -1,12 +1,25 @@
+<div align="center">
+
+![certease banner](./assets/banner.jpg)
+
 # certease
 
-[English](README.md) | [中文](README.zh.md)
+![Shell: Bash](https://img.shields.io/badge/shell-bash-4EAA25?logo=gnubash&logoColor=white)
+![Platform: Linux](https://img.shields.io/badge/platform-linux-333?logo=linux&logoColor=white)
+![License: MIT](https://img.shields.io/badge/license-MIT-blue)
+[![GitHub stars](https://img.shields.io/github/stars/tao-hpu/certease?style=social)](https://github.com/tao-hpu/certease)
 
-Standardized ACME orchestration for heterogeneous Linux fleets.
+[🌐 English](README.md) | [🇨🇳 中文](README.zh.md)
+
+**Standardized ACME orchestration for heterogeneous Linux fleets.**
+
+</div>
+
 
 A thin, idempotent Bash layer above `acme.sh` and `certbot` that unifies SSL rotation across machines with divergent nginx layouts (vanilla, LNMP one-click, control panels). Auto-detects environment, installs a consistent cron, wires a validated reload hook, and surfaces state through a single `doctor` command.
 
 ---
+
 
 ## When to use this
 
